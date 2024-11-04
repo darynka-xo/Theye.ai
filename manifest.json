@@ -1,0 +1,10 @@
+{
+  "name": "Auto Rename Elements",
+  "id": "1434972813458856673",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": { "allowedDomains": ["none"] }
+}

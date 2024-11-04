@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Экспорт JSON</title>
+</head>
+<body>
+<button id="exportButton">Скачать JSON</button>
+
+<script>
+    const exportButton = document.getElementById('exportButton');
+
+    exportButton.onclick = () => {
+        parent.postMessage({ pluginMessage: { type: 'export-json' } }, '*');
+    };
+
+    // Обрабатываем сообщение от code.js
+    window.onmessage = (event) => {
+        const msg = event.data.pluginMessage;
+        if (msg.type === 'download-json') {
+            const jsonData = msg.data;
+            downloadJson(jsonData, 'figma_data.json');
+        }
+    };
+
+    function downloadJson(data, filename) {
+        const blob = new Blob([data], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+
+        URL.revokeObjectURL(url);
+    }
+</script>
+</body>
+</html>
