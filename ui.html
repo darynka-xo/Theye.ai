@@ -1,39 +1,40 @@
+<!-- ui.html -->
 <!DOCTYPE html>
 <html>
-<head>
-    <meta charset="UTF-8">
-    <title>Экспорт JSON</title>
-</head>
 <body>
-<button id="exportButton">Скачать JSON</button>
+<h2>Введите желаемый размер фрейма</h2>
+<label>
+    Ширина:
+    <input type="number" id="width" min="1" required />
+</label>
+<br />
+<label>
+    Высота:
+    <input type="number" id="height" min="1" required />
+</label>
+<br /><br />
+<button id="submit">Применить</button>
 
 <script>
-    const exportButton = document.getElementById('exportButton');
+    const submitButton = document.getElementById('submit');
 
-    exportButton.onclick = () => {
-        parent.postMessage({ pluginMessage: { type: 'export-json' } }, '*');
-    };
+    submitButton.onclick = () => {
+        const widthInput = document.getElementById('width');
+        const heightInput = document.getElementById('height');
 
-    // Обрабатываем сообщение от code.js
-    window.onmessage = (event) => {
-        const msg = event.data.pluginMessage;
-        if (msg.type === 'download-json') {
-            const jsonData = msg.data;
-            downloadJson(jsonData, 'figma_data.json');
+        const width = parseFloat(widthInput.value);
+        const height = parseFloat(heightInput.value);
+
+        if (!width || !height || width <= 0 || height <= 0) {
+            alert('Пожалуйста, введите корректные значения ширины и высоты.');
+            return;
         }
+
+        parent.postMessage(
+            { pluginMessage: { type: 'desiredSize', width, height } },
+            '*'
+        );
     };
-
-    function downloadJson(data, filename) {
-        const blob = new Blob([data], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-
-        URL.revokeObjectURL(url);
-    }
 </script>
 </body>
 </html>

@@ -1,10 +1,15 @@
 {
-  "name": "Auto Rename Elements",
-  "id": "1434972813458856673",
+  "name": "Resizer_Demo",
+  "id": "123",
   "api": "1.0.0",
   "main": "code.js",
-  "ui": "ui.html",
   "editorType": ["figma"],
+  "ui": "ui.html",
   "documentAccess": "dynamic-page",
-  "networkAccess": { "allowedDomains": ["none"] }
+  "networkAccess": {
+    "allowedDomains": [
+      "*"
+    ],
+    "reasoning": "Checking"
+  }
 }
