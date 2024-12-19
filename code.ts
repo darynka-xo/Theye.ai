@@ -1,99 +1,395 @@
-// code.ts
-
-figma.showUI(__html__, { width: 300, height: 200 });
-
-// Интерфейсы данных
 interface ElementData {
     x: number;
     y: number;
     width: number;
     height: number;
+    properties?: any;
+    originalWidth?: number;
+    originalHeight?: number;
 }
 
 interface PredictionResult {
     frameName: string;
     width: number;
     height: number;
-    elements: { [key: string]: ElementData };
+    elements: { [key: string]: ElementData | null };
 }
 
-const expectedTypes = [
-    'age_restriction',
-    'disclaimer',
-    'imageGroup',
-    'logo',
-    'saleText',
-    'salesBadge',
-    'textGroup',
-    'vectorImage',
-];
+type Bounds = {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+};
+
+type Rectangle = {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+};
+
+function sanitizeData(obj: any): any {
+    if (obj === figma.mixed) {
+        return null;
+    }
+    if (Array.isArray(obj)) {
+        return obj.map(sanitizeData);
+    } else if (obj !== null && typeof obj === 'object') {
+        const newObj: any = {};
+        for (const [key, value] of Object.entries(obj)) {
+            newObj[key] = sanitizeData(value);
+        }
+        return newObj;
+    }
+    return obj;
+}
+
+function serializePaints(paints: ReadonlyArray<Paint> | PluginAPI['mixed']): any {
+    if (!paints || paints === figma.mixed) return null;
+    return paints.map(paint => {
+        if (paint.type === 'SOLID') {
+            return {
+                type: paint.type,
+                visible: paint.visible,
+                opacity: paint.opacity,
+                blendMode: paint.blendMode,
+                color: paint.color,
+            };
+        }
+        if (paint.type === 'IMAGE') {
+            return {
+                type: paint.type,
+                visible: paint.visible,
+                opacity: paint.opacity,
+                blendMode: paint.blendMode,
+                scaleMode: paint.scaleMode,
+                imageHash: paint.imageHash
+            };
+        }
+        return { type: paint.type };
+    });
+}
+
+function extractNodeProperties(node: SceneNode): any {
+    const properties: any = {
+        type: node.type,
+    };
+
+    if ('fills' in node) {
+        const geometryNode = node as GeometryMixin;
+        if (geometryNode.fills === figma.mixed) {
+            properties.fills = null;
+        } else {
+            properties.fills = serializePaints(geometryNode.fills);
+
+            const imageFills = (geometryNode.fills as Paint[]).filter(fill => fill.type === 'IMAGE');
+            if (imageFills.length > 0) {
+                properties.imageFills = imageFills.map(fill => ({
+                    imageHash: (fill as ImagePaint).imageHash
+                }));
+            }
+        }
+    }
+
+    if (node.type === 'TEXT') {
+        const textNode = node as TextNode;
+        properties.characters = textNode.characters;
+        properties.fontSize = textNode.fontSize === figma.mixed ? null : textNode.fontSize;
+        properties.fontName = textNode.fontName === figma.mixed ? null : textNode.fontName;
+        properties.letterSpacing = textNode.letterSpacing === figma.mixed ? null : textNode.letterSpacing;
+        properties.lineHeight = textNode.lineHeight === figma.mixed ? null : textNode.lineHeight;
+        properties.paragraphIndent = textNode.paragraphIndent;
+        properties.paragraphSpacing = textNode.paragraphSpacing;
+        properties.textCase = textNode.textCase;
+        properties.textDecoration = textNode.textDecoration;
+        properties.textAlignHorizontal = textNode.textAlignHorizontal;
+        properties.textAlignVertical = textNode.textAlignVertical;
+    }
+
+    if (
+        node.type === 'RECTANGLE' ||
+        node.type === 'ELLIPSE' ||
+        node.type === 'POLYGON' ||
+        node.type === 'STAR' ||
+        node.type === 'VECTOR'
+    ) {
+        const shapeNode = node as (RectangleNode | EllipseNode | PolygonNode | StarNode | VectorNode);
+        properties.strokes = shapeNode.strokes;
+        properties.strokeWeight = shapeNode.strokeWeight;
+        properties.strokeAlign = shapeNode.strokeAlign;
+        properties.cornerRadius = shapeNode.cornerRadius;
+        properties.cornerSmoothing = shapeNode.cornerSmoothing;
+    }
+
+    if ('effects' in node) {
+        const blendNode = node as BlendMixin;
+        properties.effects = blendNode.effects;
+    }
+
+    if ('layoutAlign' in node) {
+        properties.layoutAlign = node.layoutAlign;
+    }
+    if ('layoutGrow' in node) {
+        properties.layoutGrow = node.layoutGrow;
+    }
+
+    return properties;
+}
 
 function cleanElementName(name: string): string {
-    // Удаляем цифры в конце названия
     let cleanedName = name.replace(/\d+$/, '');
-
-    // Приводим название к нижнему регистру для упрощения сравнения
     cleanedName = cleanedName.toLowerCase();
 
-    // Специальные сопоставления
     const specialMappings: { [key: string]: string } = {
         'imageframe': 'imageGroup',
         'textframe': 'textGroup',
         'vectorimage': 'vectorImage',
     };
 
-    // Проверяем наличие точного совпадения в specialMappings
     if (specialMappings[cleanedName]) {
         return specialMappings[cleanedName];
     }
 
-    // Проверяем наличие ключевого слова из ожидаемых типов
     for (const type of expectedTypes) {
-        const regex = new RegExp(type, 'i'); // Регистр независим
+        const regex = new RegExp(type, 'i');
         if (regex.test(cleanedName)) {
-            // Возвращаем стандартное имя типа
             return type;
         }
     }
 
-    // Если нет совпадений, возвращаем исходное имя без цифр на конце
     return cleanedName;
 }
 
+function adjustPositionRelativeToParent(
+    parentOriginalWidth: number,
+    parentOriginalHeight: number,
+    parentNewWidth: number,
+    parentNewHeight: number,
+    childX: number,
+    childY: number
+) {
+    const scaleX = parentNewWidth / parentOriginalWidth;
+    const scaleY = parentNewHeight / parentOriginalHeight;
 
-// Функция для отправки данных на API и получения предсказаний
-async function getPredictions(frameData: any): Promise<PredictionResult> {
-    // Логирование тела запроса
-    console.log('Отправляемое тело запроса:', JSON.stringify(frameData, null, 2));
-
-    const response = await fetch('https://easyai.kz/predict', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(frameData),
-    });
-
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Ошибка API: ${response.status} ${response.statusText} - ${errorText}`);
-    }
-
-    const data = await response.json();
-    return data as PredictionResult;
+    return {
+        x: childX * scaleX,
+        y: childY * scaleY,
+    };
 }
 
-// Главная функция плагина
+function getNodeBounds(node: SceneNode): Bounds {
+    if (hasBounds(node)) {
+        return node.bounds;
+    }
+    return { x: 0, y: 0, width: 0, height: 0 };
+}
+
+function hasBounds(node: SceneNode): node is SceneNode & { bounds: Rectangle } {
+    return 'bounds' in node && node.bounds !== undefined && typeof node.bounds === 'object';
+}
+
+function canResize(node: SceneNode): node is FrameNode | GroupNode {
+    return node.type === 'FRAME' || node.type === 'GROUP';
+}
+
+function checkAndResolveOverlap(nodeA: SceneNode, nodeB: SceneNode, frame: FrameNode) {
+    const aBounds = getNodeBounds(nodeA);
+    const bBounds = getNodeBounds(nodeB);
+
+    if (
+        aBounds.x < bBounds.x + bBounds.width &&
+        aBounds.x + aBounds.width > bBounds.x &&
+        aBounds.y < bBounds.y + bBounds.height &&
+        aBounds.y + aBounds.height > bBounds.y
+    ) {
+        const overlapX =
+            Math.min(aBounds.x + aBounds.width, bBounds.x + bBounds.width) - Math.max(aBounds.x, bBounds.x);
+        const overlapY =
+            Math.min(aBounds.y + aBounds.height, bBounds.y + bBounds.height) - Math.max(aBounds.y, bBounds.y);
+
+        if (overlapX > overlapY) {
+            nodeB.x += overlapX + 10;
+        } else {
+            nodeB.y += overlapY + 10;
+        }
+
+        nodeB.x = Math.max(0, Math.min(frame.width - nodeB.width, nodeB.x));
+        nodeB.y = Math.max(0, Math.min(frame.height - nodeB.height, nodeB.y));
+    }
+}
+
+function preserveAspectRatio(
+    originalWidth: number,
+    originalHeight: number,
+    maxWidth: number,
+    maxHeight: number,
+    minScale: number = 0.1
+) {
+    const scale = Math.max(
+        Math.min(maxWidth / originalWidth, maxHeight / originalHeight),
+        minScale
+    );
+    return {
+        width: originalWidth * scale,
+        height: originalHeight * scale,
+    };
+}
+
+function adjustPositionToFitFrame(
+    x: number,
+    y: number,
+    elementWidth: number,
+    elementHeight: number,
+    frameWidth: number,
+    frameHeight: number
+): { x: number; y: number } {
+    return {
+        x: Math.max(0, Math.min(frameWidth - elementWidth, x)),
+        y: Math.max(0, Math.min(frameHeight - elementHeight, y)),
+    };
+}
+
+function resolveOverlapWithPadding(
+    nodeA: SceneNode,
+    nodeB: SceneNode,
+    padding: number = 10
+) {
+    const aBounds = { x: nodeA.x, y: nodeA.y, width: nodeA.width, height: nodeA.height };
+    const bBounds = { x: nodeB.x, y: nodeB.y, width: nodeB.width, height: nodeB.height };
+
+    if (
+        aBounds.x < bBounds.x + bBounds.width &&
+        aBounds.x + aBounds.width > bBounds.x &&
+        aBounds.y < bBounds.y + bBounds.height &&
+        aBounds.y + aBounds.height > bBounds.y
+    ) {
+        if (aBounds.y + aBounds.height + padding < bBounds.y) {
+            nodeB.y += padding + aBounds.height;
+        } else {
+            nodeB.x += padding + aBounds.width;
+        }
+    }
+}
+
+function getAbsolutePosition(node: SceneNode): { x: number; y: number } {
+    const transform = node.absoluteTransform;
+    return { x: transform[0][2], y: transform[1][2] };
+}
+
+function getRelativePosition(node: SceneNode, parentNode: SceneNode): { x: number; y: number } {
+    const nodePosition = getAbsolutePosition(node);
+    const parentPosition = getAbsolutePosition(parentNode);
+    return {
+        x: nodePosition.x - parentPosition.x,
+        y: nodePosition.y - parentPosition.y,
+    };
+}
+
+function findNodeByNames(node: SceneNode, baseNames: string[]): SceneNode | null {
+    for (const baseName of baseNames) {
+        if (node.name.startsWith(baseName)) {
+            return node;
+        }
+    }
+    if ('children' in node) {
+        for (const child of node.children) {
+            const result = findNodeByNames(child, baseNames);
+            if (result) {
+                return result;
+            }
+        }
+    }
+    return null;
+}
+
+async function extractFrames(nodes: readonly SceneNode[]): Promise<any[]> {
+    const frames: any[] = [];
+
+    for (const node of nodes) {
+        if (node.type === 'FRAME') {
+            const frameData: any = {
+                frameName: node.name,
+                width: node.width,
+                height: node.height,
+            };
+
+            for (const key in elementsToFind) {
+                const namesToSearch = elementsToFind[key];
+                const foundNode = findNodeByNames(node, namesToSearch);
+                if (foundNode) {
+                    const relativePosition = getRelativePosition(foundNode, node);
+                    frameData[key] = {
+                        x: relativePosition.x,
+                        y: relativePosition.y,
+                        width: foundNode.width,
+                        height: foundNode.height,
+                        properties: sanitizeData(extractNodeProperties(foundNode)),
+                    };
+                } else {
+                    frameData[key] = null;
+                }
+            }
+
+            frames.push(frameData);
+        }
+    }
+
+    return frames;
+}
+
+const elementsToFind = {
+    'logo': ['logo'],
+    'textGroup': ['textGroup', 'textFrame'],
+    'imageGroup': ['imageGroup', 'imageFrame'],
+    'saleGroup': ['saleFrame', 'saleGroup'],
+    'disclaimer': ['disclaimer'],
+    'age_restriction': ['age_restriction'],
+    'salesBadge': ['salesBadge'],
+    'saleText': ['saleText'],
+    'text': ['text'],
+    'frame': ['Frame'],
+};
+
+const expectedTypes = Object.keys(elementsToFind);
+
+async function addImageDataToFrames(framesData: any[]) {
+    for (const frameData of framesData) {
+        for (const key of Object.keys(frameData)) {
+            const element = frameData[key];
+            if (element && element.properties && element.properties.imageFills) {
+                const imageDataArray: any[] = [];
+
+                for (const imgFill of element.properties.imageFills) {
+                    if (imgFill.imageHash) {
+                        const image = figma.getImageByHash(imgFill.imageHash);
+                        if (image) {
+                            const bytes = await image.getBytesAsync();
+                            const base64 = figma.base64Encode(bytes);
+                            imageDataArray.push({
+                                imageHash: imgFill.imageHash,
+                                base64: base64
+                            });
+                        }
+                    }
+                }
+
+                if (imageDataArray.length > 0) {
+                    element.properties.imageData = imageDataArray;
+                }
+            }
+        }
+    }
+}
+
 async function main(desiredWidth: number, desiredHeight: number) {
-    // Проверяем, есть ли выбранные объекты
     if (!figma.currentPage.selection.length) {
-        figma.notify('Пожалуйста, выберите один или несколько фреймов.');
+        figma.notify('Please select one or more frames.');
         return;
     }
 
     const framesToProcess: FrameNode[] = [];
 
-    // Собираем только фреймы из выбранных объектов
     for (const node of figma.currentPage.selection) {
         if (node.type === 'FRAME') {
             framesToProcess.push(node as FrameNode);
@@ -101,176 +397,197 @@ async function main(desiredWidth: number, desiredHeight: number) {
     }
 
     if (framesToProcess.length === 0) {
-        figma.notify('Выбранные объекты не содержат фреймы.');
+        figma.notify('Selected objects do not contain frames.');
         return;
     }
 
-    // Обрабатываем фреймы
-    await processFrames(framesToProcess, desiredWidth, desiredHeight);
+    let framesData = await extractFrames(figma.currentPage.selection);
+    await addImageDataToFrames(framesData);
 
-    figma.closePlugin(); // Закрываем плагин после выполнения
+    await processFrames(framesData, desiredWidth, desiredHeight);
+    setTimeout(() => {
+        figma.closePlugin();
+    }, 2000);
 }
 
-// Функция для обработки фреймов
-async function processFrames(frames: FrameNode[], desiredWidth: number, desiredHeight: number) {
-    for (const frame of frames) {
-        // Собираем данные о фрейме
-        const frameData: any = {
-            frameName: frame.name,
-            width: frame.width,
-            height: frame.height,
-            desiredWidth: desiredWidth,
-            desiredHeight: desiredHeight,
-        };
+async function processFrames(framesData: any[], desiredWidth: number, desiredHeight: number) {
+    for (const frameData of framesData) {
+        frameData.desiredWidth = desiredWidth;
+        frameData.desiredHeight = desiredHeight;
 
-        // Собираем данные о дочерних элементах
-        for (const child of frame.children) {
-            // Оригинальное имя узла
-            const originalName = child.name;
-
-            // Очищенное имя для использования в запросе
-            const elementType = cleanElementName(originalName);
-
-            // Проверяем, является ли child допустимым узлом
-            if ('x' in child && 'y' in child && 'width' in child && 'height' in child) {
-                frameData[elementType] = {
-                    x: child.x,
-                    y: child.y,
-                    width: child.width,
-                    height: child.height,
-                };
-            } else {
-                // Если узел не поддерживает необходимые свойства, установим значение null
-                frameData[elementType] = null;
-            }
-        }
+        const sanitizedFrameData = sanitizeData(frameData);
 
         try {
-            console.log('Отправляем на API frameData:', JSON.stringify(frameData, null, 2));
-            const prediction = await getPredictions(frameData);
-            console.log('Получен ответ от API:', JSON.stringify(prediction, null, 2));
+            const prediction = await getPredictions(sanitizedFrameData);
+            const originalFrame = figma.currentPage.findOne(
+                n => n.name === frameData.frameName && n.type === 'FRAME'
+            ) as FrameNode | null;
 
-            if (!prediction.width || !prediction.height) {
-                throw new Error('Получены некорректные размеры фрейма из API.');
+            if (!originalFrame) {
+                console.error(`Original frame '${frameData.frameName}' not found.`);
+                continue;
             }
 
-            if (!prediction.elements || Object.keys(prediction.elements).length === 0) {
-                throw new Error('API не вернул данные о элементах.');
-            }
-
-            // Клонируем оригинальный фрейм
-            const newFrame = frame.clone() as FrameNode;
-
+            const newFrame = originalFrame.clone() as FrameNode;
+            newFrame.x = originalFrame.x;
+            newFrame.y = originalFrame.y;
+            figma.currentPage.appendChild(newFrame);
+            figma.currentPage.selection = [newFrame];
             newFrame.name = prediction.frameName;
-            newFrame.x = frame.x + frame.width + 50;
-            newFrame.y = frame.y;
-
-            // Изменяем размер нового фрейма
             newFrame.resizeWithoutConstraints(prediction.width, prediction.height);
 
-            // Применяем предсказанные позиции и размеры к элементам
-            await applyPredictedSizes(newFrame, prediction.elements);
-
-        } catch (error) {
-            figma.notify(`Ошибка при обработке фрейма '${frame.name}': ${error.message}`);
-            console.error(`Ошибка при обработке фрейма '${frame.name}':`, error);
+            await loadFontsRecursively(newFrame);
+            await applyPredictedSizes(
+                newFrame,
+                prediction,
+                originalFrame.width,
+                originalFrame.height,
+                prediction.width,
+                prediction.height
+            );
+        } catch (error: any) {
+            figma.notify(`Error processing frame '${frameData.frameName}': ${error.message}`);
+            console.error(`Error processing frame '${frameData.frameName}':`, error);
         }
     }
 }
-async function applyPredictedSizes(frame: FrameNode, predictedElements: { [key: string]: ElementData }) {
-    for (const [elementName, elementData] of Object.entries(predictedElements)) {
+
+async function applyPredictedSizes(
+    frame: FrameNode,
+    prediction: PredictionResult,
+    originalFrameWidth: number,
+    originalFrameHeight: number,
+    newFrameWidth: number,
+    newFrameHeight: number
+) {
+    console.log('Starting applyPredictedSizes');
+
+    const elementKeys = [
+        'logo',
+        'textGroup',
+        'imageGroup',
+        'saleGroup',
+        'disclaimer',
+        'age_restriction',
+        'salesBadge',
+        'saleText',
+        'text',
+        'frame'
+    ];
+
+    for (const elementName of elementKeys) {
+        const elementData = (prediction as any)[elementName];
+        if (!elementData) continue;
+
         const node = frame.findOne(n => cleanElementName(n.name) === elementName) as SceneNode | null;
+        if (!node) continue;
 
-        if (!node) {
-            console.warn(`Element '${elementName}' not found in frame '${frame.name}', skipping.`);
-            continue;
+        const { x, y } = adjustPositionRelativeToParent(
+            originalFrameWidth,
+            originalFrameHeight,
+            newFrameWidth,
+            newFrameHeight,
+            elementData.x,
+            elementData.y
+        );
+
+        const constrainedPosition = adjustPositionToFitFrame(
+            x,
+            y,
+            node.width,
+            node.height,
+            newFrameWidth,
+            newFrameHeight
+        );
+
+        node.x = constrainedPosition.x;
+        node.y = constrainedPosition.y;
+
+        const { width: scaledWidth, height: scaledHeight } = preserveAspectRatio(
+            elementData.width,
+            elementData.height,
+            newFrameWidth,
+            newFrameHeight
+        );
+
+        if (canResize(node)) {
+            node.resize(scaledWidth, scaledHeight);
         }
 
-        // Update position
-        node.x = elementData.x;
-        node.y = elementData.y;
-
-        // Resize elements
-        if ('resize' in node) {
-            // Handle text nodes
-            if (node.type === 'TEXT') {
-                const textNode = node as TextNode;
-                await loadFontsRecursively(textNode);
-
-                textNode.textAutoResize = 'NONE'; // Disable auto resizing
-                const scaleX = elementData.width / node.width;
-                const scaleY = elementData.height / node.height;
-                const scale = Math.min(scaleX, scaleY);
-
-                if (typeof textNode.fontSize === 'number') {
-                    const newFontSize = Math.max(1, textNode.fontSize * scale);
-                    console.log(`Scaling font from ${textNode.fontSize} to ${newFontSize}`);
-                    textNode.fontSize = newFontSize;
-                }
-
-                if (textNode.lineHeight !== figma.mixed && textNode.lineHeight.unit !== 'AUTO') {
-                    textNode.lineHeight = {
-                        ...textNode.lineHeight,
-                        value: Math.max(1, (textNode.lineHeight.value as number) * scale),
-                    };
-                }
-
-                if (textNode.letterSpacing !== figma.mixed) {
-                    textNode.letterSpacing = {
-                        ...textNode.letterSpacing,
-                        value: Math.max(0, (textNode.letterSpacing.value as number) * scale),
-                    };
-                }
-
-                textNode.resize(elementData.width, elementData.height); // Resize the container
-
-            }
-            // Handle other node types
-            else {
-                node.resize(elementData.width, elementData.height);
-            }
+        if (node.type === 'TEXT' && elementData.properties?.fontSize) {
+            const textNode = node as TextNode;
+            const scaleFactor = Math.min(newFrameWidth / originalFrameWidth, newFrameHeight / originalFrameHeight);
+            textNode.fontSize = Math.max(elementData.properties.fontSize * scaleFactor, 10);
         }
     }
+
+    frame.children.forEach(childA => {
+        for (let i = frame.children.indexOf(childA) + 1; i < frame.children.length; i++) {
+            const childB = frame.children[i];
+            checkAndResolveOverlap(childA, childB, frame);
+        }
+    });
 }
-
-
-
-
 
 async function loadFontsRecursively(node: SceneNode) {
-
-
     if (node.type === 'TEXT') {
         const textNode = node as TextNode;
         const fontNames = textNode.getRangeAllFontNames(0, textNode.characters.length);
-        const uniqueFontNames = Array.from(new Set(fontNames.map(f => JSON.stringify(f)))).map(f => JSON.parse(f));
-        for (const font of uniqueFontNames) {
-            try {
-                await figma.loadFontAsync(font as FontName);
-            } catch (error) {
-                console.error(`Не удалось загрузить шрифт ${font.family} ${font.style}:`, error);
-                figma.notify(`Не удалось загрузить шрифт ${font.family} ${font.style}.`);
-            }
+        for (const font of fontNames) {
+            await figma.loadFontAsync(font);
         }
     } else if ('children' in node) {
         for (const child of node.children) {
-            await loadFontsRecursively(child as SceneNode);
+            await loadFontsRecursively(child);
         }
     }
 }
 
+async function getPredictions(frameData: any): Promise<PredictionResult> {
+    const url = 'https://easyai.kz/predictv1';
+    const options: RequestInit = {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(frameData),
+    };
 
-// Обработчик сообщений от UI
+    console.log('Sending request to API:', url);
+    console.log('Request Method:', options.method);
+    console.log('Request Headers:', options.headers);
+    console.log('Request Body:', JSON.stringify(frameData, null, 2));
+
+    const response = await fetch(url, options);
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`API Error: ${response.status} ${response.statusText} - ${errorText}`);
+    }
+
+    const responseData = await response.json() as PredictionResult;
+    console.log('API Response:', JSON.stringify(responseData, null, 2));
+    return responseData;
+}
+
+figma.showUI(__html__, { width: 400, height: 300 });
+
 figma.ui.onmessage = async (msg) => {
+    if (msg.type === 'export') {
+        figma.notify('Exporting frames...');
+        const framesData = await extractFrames(figma.currentPage.children);
+        await addImageDataToFrames(framesData);
+        figma.notify(`Found ${framesData.length} frames`);
+        const sanitizedData = sanitizeData(framesData);
+        figma.ui.postMessage({ type: 'result', data: sanitizedData });
+    }
+
     if (msg.type === 'desiredSize') {
-        const desiredWidth = msg.width;
-        const desiredHeight = msg.height;
-
-        if (desiredWidth <= 0 || desiredHeight <= 0) {
-            figma.notify('Недопустимые размеры. Пожалуйста, введите положительные значения.');
-            return;
+        const { width, height } = msg;
+        if (width > 0 && height > 0) {
+            await main(width, height);
+        } else {
+            figma.notify('Invalid size. Please enter positive values.');
         }
-
-        await main(desiredWidth, desiredHeight);
     }
 };
